@@ -1,1 +1,1 @@
-CPM22DUP.IMD - Lobo CP/M 2.2 distribution image duplicate
+CPM22DUP.IMD - Lobo MAX-80 CP/M 2.2 distribution - duplicate
