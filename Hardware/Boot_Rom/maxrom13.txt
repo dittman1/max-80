@@ -1,0 +1,451 @@
+;************************************************
+;*    MAX-80  Utility Program For  CP/M  3      *
+;*  Program Name     =  MAXROM13.MAC            *
+;*  Program Revision =  12/23/83                *
+;*  Program Purpose  =  Boot ROM for MAX-80     *
+;*      Version 1.3                             *
+;*                                              *
+;*  Copyright (c) 1983, Lobo Systems   <GLT>    *
+;************************************************
+;
+;        TITLE   MAX-80 BOOT ROM
+;
+;*****************************************************************************
+;*                                  COMMENTS                                 *
+;*****************************************************************************
+;
+;12/23/83   1.  Released for external shipment.   <GLT>
+;12/20/83   1.  Second internal release this date.   <GLT>
+;12/08/83   1.  Released for internal testing.   <GLT>
+;11/22/83   1.  Created version 1.3 for use with SASI hard drives (256/512)
+;               UVC hard drives (256) and floppy drives (128/256/512).  <KLH>
+;
+;
+;
+;        .Z80
+;       ASEG
+;        .PHASE  0
+        ORG     0
+;
+;********************************
+;*       GENERAL EQUATES        *
+;********************************
+;
+BSECT   EQU     400H            ;BOOT SECTOR LOAD ADDRESS
+STACK   EQU     6FFH            ;STACK DURING BOOT
+MLATCH  EQU     7D8H            ;DISK SELECT REGISTER
+DSTAT   EQU     7E0H            ;SYSTEM FLAGS
+FCTRL   EQU     7ECH            ;FDC CONTROL
+FSTAT   EQU     7ECH            ;FDC STATUS
+FTRACK  EQU     7EDH            ;FDC TRACK
+FSECTOR EQU     7EEH            ;FDC SECTOR
+FDATA   EQU     7EFH            ;FDC DATA
+UDATA   EQU     7F0H            ;UVC DATA
+UDATAHS EQU     7F1H            ;UVC DATA, AUTO ACK
+UCTRL   EQU     7F4H            ;UVC CONTROL
+USTAT   EQU     7F4H            ;UVC STATUS
+DIPSW   EQU     7F8H            ;DIP SWITCH
+BEEP    EQU     7F8H            ;BEEP ONCE
+PIODA   EQU     7FCH            ;PIO DATA PORT A
+PIOCA   EQU     7FDH            ;PIO CONTROL PORT A
+PIODB   EQU     7FEH            ;PIO DATA PORT A
+PIOCB   EQU     7FFH            ;PIO CONTROL PORT A
+;
+;********************************
+;*    DIP SWITCH DEFINITIONS    *
+;********************************
+;
+; The BOOT routine samples DIP switches
+; 6,7,8 to determine the drive type.
+;
+;   0   No drive
+;   1   5-inch floppy
+;   2   8-inch floppy
+;   3   5-inch winchester  (UVC)
+;   4   8-inch winchester  (UVC)
+;   5   5-inch backup floppy  (UVC)
+;   6   8-inch backup floppy  (UVC)
+;   7   Drive zero  (SASI)
+;
+;********************************
+;*    BOOTSTRAP ENTRY POINT     *
+;********************************
+;
+ROM:    DI
+        JR      BOOT
+;
+;********************************
+;*        READ ROUTINES         *
+;********************************
+;
+;READ HEAD A, TRACK DE, SECTORS B-C (IF FLOPPY OR UVC) INTO ADDRESS HL.
+;READ BLOCKS ADE+B TO ADE+C (IF SASI) INTO ADDRESS HL.
+;DRIVE HAS BEEN SELECTED AND TRACK REGISTER IS VALID.
+;ALTERNATE AF'=0/Z IF FLOPPY, DSC/NZ IF UVC, 00/NZ IF SASI.
+;'BOOT' POINTS IY TO MLATCH.  'READ' REQUIRES THIS TO WORK.
+;
+READ:   CALL    TRY             ;READER ENTRY POINT...
+        CALL    C,SQUAWK
+        JR      C,READ          ;RETRY IF ERROR
+        PUSH    AF
+        LD      A,B
+        CP      C
+        JR      Z,RDDUN         ;DONE READING SECTORS, NO ERRORS, NC
+        POP     AF
+        INC     B               ;NEXT SECTOR
+        JR      READ
+RDDUN:  POP     AF
+        RET
+;
+        NOP                     ;SKIP DOWN TO 'RST 18H' ADDRESS
+        NOP
+RST18H: LD      A,(USTAT)       ;INPUT FROM USTAT PORT
+        BIT     2,A             ;TEST BUSY BIT
+        RET
+;
+;********************************
+;*  EXERCISE RAM & INITIALIZE   *
+;********************************
+;
+;EXERCISE RAM WHILE DELAYING A FEW MILLISECONDS
+;
+BOOT:   LD      SP,STACK
+        LD      IY,MLATCH       ;SET IY FOR BOOT AND READ OPERATIONS
+;
+        LD      A,170           ;INITIALIZE DELAY LOOP
+BOOT1:  PUSH    HL              ;EXERCISE RAM
+        POP     HL
+BOOT1A: DJNZ    BOOT1A          ;DELAY
+        CP      170-20          ;RESET-BUTTON-RELEASE TIMER
+        JR      NZ,NOBP
+        LD      (BEEP),A        ;FIRST BEEP
+;
+NOBP:   LD      HL,PIOCB        ;CONTROL PORT B
+        LD      (HL),B          ;NULL CONTROL BYTE
+        LD      (HL),0CFH       ;SET CHANNEL TO MODE 3
+        LD      (HL),80H        ;SET OUTPUT/INPUT BITS
+        DEC     HL              ;DATA PORT B
+        LD      (HL),B          ;CLEAR ALL CLOCK/CALENDAR BITS
+;
+        DEC     HL              ;CONTROL PORT A
+        LD      (HL),B          ;NULL CONTROL BYTE
+        LD      (HL),0CFH       ;SET CHANNEL TO MODE 3
+        LD      (HL),0FH        ;SET OUTPUT/INPUT BITS
+        DEC     HL              ;DATA PORT A
+        LD      (HL),80H        ;SELECT RAM 32K CHUNKS A1 & B1
+;
+        DEC     A
+        JR      NZ,BOOT1        ;REPEAT LOOP INITIALIZATION
+;
+        LD      DE,0FFFFH
+        LD      A,(DE)
+        LD      B,A             ;SAVE BYTE
+        XOR     A
+        LD      (DE),A          ;ZERO INTO BANK B
+        LD      A,(DE)
+        AND     A               ;ZERO IF RAM EXISTS
+        LD      A,B
+        LD      (DE),A          ;RESTORE BYTE
+        LD      (HL),40H        ;SELECT RAM 32K CHUNKS A1 & A2
+        JR      NZ,GETDIP       ;NO RAM
+;
+;********************************
+;*  DETERMINE BOOT DRIVE TYPE   *
+;********************************
+;
+GETAGN: CALL    SQUAWK
+GETDIP: LD      A,(DIPSW)
+        AND     7
+        JR      Z,GETAGN        ;NO DRIVE
+        CP      7
+        JR      Z,SASI          ;DO SASI BOOT
+        SUB     3
+        JR      C,BFLOP         ;DO FLOPPY BOOT
+        LD      E,5CH
+        JR      Z,UVC           ;DO 5-INCH HARD BOOT
+        DEC     A
+        LD      E,7CH
+        JR      Z,UVC           ;DO 8-INCH HARD BOOT
+        DEC     A
+        LD      E,1DH
+        JR      Z,UVC           ;DO 5-INCH BACKUP BOOT
+        LD      E,25H           ;DO 8-INCH BACKUP BOOT
+UVC:    LD      A,E
+        AND     A               ;SET NZ FLAG
+SETHRD: EX      AF,AF'          ;REMEMBER DSC/NZ
+        XOR     A               ;HEAD 0
+        LD      B,A
+        LD      C,A             ;SECTORS 0-0
+        LD      D,A
+        LD      E,A             ;CYLINDER 0
+        LD      HL,BSECT        ;LOAD ADDRESS
+        CALL    READ
+GOBS:   JP      BSECT           ;EXECUTE SECTOR
+;
+SASI:   AND     A
+        LD      A,0             ;SET 00/NZ
+        JR      SETHRD
+;
+BFLOP:  LD      E,41H           ;SET DOUBLE-DENSITY 5-INCH
+        INC     A
+        JR      NZ,EM           ;BOOT 5-INCH FLOPPY
+        LD      E,61H           ;BOOT 8-INCH FLOPPY
+EM:     LD      (IY+0),E        ;SELECT DRIVE
+        XOR     A
+        EX      AF,AF'          ;FLAG FLOPPY
+        LD      A,0D0H XOR 0FFH ;STOP FDC
+        CALL    FSEND
+        LD      A,0BH XOR 0FFH  ;RESTORE HEAD TO TRACK 0
+        CALL    SENDS
+        LD      A,(FSTAT)
+        AND     0A4H            ;READY,HDLD,TR00
+        SUB     80H
+        JR      NZ,GETAGN       ;SOMETHING DIDN'T MATCH
+        LD      D,A             ;SET TRACK NUMBER TO ZERO
+        LD      E,A
+XTRY:   LD      B,A             ;TRY READING SECTOR 0 ON DISK
+        LD      C,A
+XXTRY:  LD      HL,BSECT
+        CALL    TRY
+        JR      NC,GOBS
+        LD      A,(IY+0)
+        XOR     40H             ;TOGGLE DENSITY
+        LD      (IY+0),A
+        AND     40H
+        JR      Z,XXTRY
+        LD      A,B             ;TOGGLE SECTOR 0 - 1
+        XOR     1
+        JR      NZ,XTRY
+        JR      GETDIP          ;TRY AGAIN
+;
+;********************************
+;*    LOW LEVEL DISK READ       *
+;********************************
+;
+TRY:    EX      AF,AF'          ;GET CODE,FLAGS
+        JP      NZ,RHARD
+;
+;********************************
+;*     FLOPPY READ ROUTINE      *
+;********************************
+;
+        EX      AF,AF'          ;GET HEAD NUMBER
+        PUSH    AF              ;SAVE HEAD
+        RES     4,(IY+0)        ;RESET SIDE NUMBER
+        RRCA                    ;NC IF HEAD ZERO
+        JR      NC,RDMOR
+        SET     4,(IY+0)        ;SET SIDE NUMBER
+;
+RDMOR:  LD      A,E             ;TRACK NUMBER
+        CPL
+        LD      (FDATA),A
+        LD      A,1BH XOR 0FFH  ;SEEK SLOW
+        CALL    SENDS           ;REFRESHES MOTORS TOO
+        LD      A,E
+        CPL
+        LD      (FTRACK),A      ;JUST IN CASE FDC FORGOT
+        LD      A,B
+        CPL
+        LD      (FSECTOR),A     ;SECTOR NUMBER
+        LD      A,(IY+0)
+        AND     10H             ;GET SIDE BIT
+        RRCA                    ;INTO BIT 3
+        OR      82H             ;READ COMMAND
+        CPL
+        LD      (FCTRL),A
+        PUSH    HL              ;IN CASE OF ERROR
+        PUSH    DE
+        PUSH    BC
+        EX      DE,HL           ;DE = LOAD ADDRESS
+        LD      HL,USTAT        ;POINT TO DRQ- AND INTRQ-
+        LD      BC,FDATA        ;POINT TO FDC DATA PORT
+        CALL    LREAD
+        EX      DE,HL           ;HL = NEXT LOAD ADDRESS
+        POP     BC
+        POP     DE
+        LD      A,(FSTAT)       ;CHECK READ STATUS
+        CPL
+        AND     9FH
+        JR      Z,RDOK          ;GOOD READ
+        POP     HL              ;BAD, RECOVER LOAD ADDRESS
+        POP     AF              ;GET HEAD NUMBER
+        SCF
+        RET                     ;EXIT WITH ERROR
+RDOK:   POP     AF              ;EAT OLD HL, KEEP NEW HL
+        POP     AF              ;GET HEAD NUMBER
+        AND     A               ;CLEAR CY
+        RET
+;
+NOBYTE: RET     PO              ;RETURN IF INTRQ HAPPENED
+RLOOP:  AND     (HL)            ;CLEAR BITS IF DRQ OR INTRQ
+        JP      M,NOBYTE        ;DRQ WASN'T HAPPENING
+        LD      A,(BC)          ;GET DATA- BYTE
+        CPL                     ;MAKE NORMAL
+        LD      (DE),A          ;STORE IT
+        INC     DE              ;NEXT LOAD ADDRESS
+LREAD:  LD      A,0C0H          ;PREPARE MASK
+        JP      RLOOP           ;GO CHECK FOR NEXT BYTE
+;
+SENDS:  BIT     5,(IY+0)        ;TEST MINI/EIGHT BIT
+        JR      Z,FSEND         ;MUST BE MINI, 30MS
+        OR      1               ;MAKE 10MS
+;
+FSEND:  LD      (FCTRL),A       ;SEND COMMAND TO FDC
+        LD      A,20            ;WAIT FOR THINGS TO SETTLE
+SNDW:   DEC     A
+        JR      NZ,SNDW
+SENDX:  RES     7,(IY+0)        ;REFRESH MINI MOTORS (READ/WRITE MLATCH)
+        LD      A,(FSTAT)       ;CHECK IF DONE
+        RRCA
+        JR      NC,SENDX        ;NOT DONE, WAIT
+        RET
+;
+;********************************
+;*    HARD DISK READ ROUTINES   *
+;********************************
+;
+RHARD:  PUSH    AF              ;SAVE DSC
+        PUSH    BC
+        LD      C,A             ;DSC INTO C
+SETUP:  RST     18H             ;GET USTAT
+        AND     4
+        JR      Z,UVCOFF
+        LD      (UCTRL),A
+        LD      A,10
+SETL:   DEC     A
+        JR      NZ,SETL
+        LD      (UCTRL),A
+        JR      SETUP
+;
+UVCOFF: INC     A               ;MAKE 1
+        LD      (UDATA),A
+        INC     A               ;MAKE 2
+        LD      (UCTRL),A       ;SELECT CONTROLLER
+UVCSET: RST     18H             ;GET USTAT, WAIT FOR BUSY
+        JR      Z,UVCSET
+        XOR     A
+        LD      (UCTRL),A       ;STOP TRYING TO SELECT
+;
+        LD      A,C
+        AND     A
+        JR      NZ,UVC1
+        PUSH    AF              ;PUSH ZERO CONTROL BYTE IF SASI
+;
+UVC1:   LD      A,1
+        PUSH    AF              ;PUSH 01
+        JR      Z,SASI1         ;ZERO IF WAS SASI
+        PUSH    DE              ;PUSH D  CYL1
+        LD      A,E
+        PUSH    AF              ;PUSH E  CYL0
+        PUSH    BC              ;PUSH B  SECTOR
+        EX      AF,AF'
+        PUSH    AF              ;PUSH A  HEAD
+        EX      AF,AF'
+        LD      A,C
+        JR      UVC2            ;GO PUSH C  DSC
+;
+SASI1:  LD      A,E
+        ADD     A,B             ;ADD OFFSET TO BLOCK NUMBER (LSB)
+        PUSH    AF              ;PUSH A  LSB
+        JR      NC,NOC1         ;NO CARRY, PUSH NEXT TWO BYTES
+        LD      A,D
+        INC     A
+        PUSH    AF              ;PUSH D+1  NSB
+        JR      NZ,NOC2         ;NO CARRY, PUSH LAST BYTE
+        LD      A,C
+        INC     A
+        JR      NOC3            ;CAN'T CARRY
+NOC1:   PUSH    DE              ;PUSH D  NSB
+NOC2:   LD      A,C
+NOC3:   PUSH    AF              ;PUSH C  LUN,MSB
+        LD      A,8
+;
+UVC2:   PUSH    AF              ;PUSH LAST ITEM
+        LD      B,6             ;SEND 6 BYTES FROM STACK TO CONTROLLER
+SENDM:  POP     AF
+        CALL    USEND
+        DJNZ    SENDM
+;
+        LD      A,C             ;GET DSC
+        AND     A               ;TEST FOR ZERO (ALSO CLEARS CY)
+        JR      Z,SASI2         ;IF SASI
+        CALL    UGET            ;GET UVC ADDRESS MARK
+        CP      0F0H            ;LEGAL AM VALUE?
+        JR      C,HERR          ;NO, MUST BE ERROR CODE
+SASI2:  CALL    UGET            ;GET DATA BYTE, IF NO ERROR FROM CONTROLLER
+        JR      C,HERR          ;OOPS, WE GOT A CONTROL BYTE
+        LD      (HL),A
+        INC     HL
+USREAD: CALL    UGET            ;GET DATA BYTE (PERHAPS CONTROL)
+        JR      C,GTSTAT        ;IF DATA DONE, THEN WE HAVE STATUS BYTE
+        LD      (HL),A
+        INC     HL
+        JR      USREAD
+;
+GTSTAT: AND     A
+        JR      NZ,HERRH        ;ERROR!
+        LD      A,C
+        AND     A
+        CALL    Z,UGET          ;IF SASI, EAT LAST BYTE
+UNSEL:  RST     18H             ;GET USTAT
+        JR      NZ,UNSEL        ;WAIT FOR DE-SELECTION
+        POP     BC
+        POP     AF              ;DSC
+        EX      AF,AF'          ;HEAD NUMBER
+        SCF
+        CCF                     ;NO ERROR
+        RET
+HERRH:  DEC     H               ;BACK TO SAME SECTOR
+HERR:   POP     BC
+        POP     AF              ;DSC
+        EX      AF,AF'          ;HEAD NUMBER
+        SCF
+        RET
+;
+UGET:
+USEND:  PUSH    AF              ;GET BYTE FROM CONTROLLER
+GS:     RST     18H             ;GET USTAT
+        RRCA
+        JR      NC,GS
+        POP     AF
+        LD      (UDATA),A
+        RST     18H             ;GET USTAT
+        RLCA
+        RLCA
+        RLCA
+        RLCA                    ;PUT CONTROL-BYTE FLAG INTO CY
+        LD      A,(UDATA)       ;GET DATA BYTE, COMPLETE HANDSHAKE
+        PUSH    AF
+        LD      A,1             ;SET ACK
+        LD      (UCTRL),A
+GS1:    RST     18H             ;GET USTAT, WAIT FOR REQ TO GO AWAY
+        AND     1
+        JR      NZ,GS1
+        LD      (UCTRL),A       ;TURN OFF ACK
+        POP     AF
+        RET
+;
+;********************************
+;*           ERROR              *
+;********************************
+;
+SQUAWK: PUSH    AF
+        LD      (BEEP),A
+        PUSH    BC
+        LD      B,0FFH          ;PAUSE AFTER BEEP
+DLY:    DEC     BC
+        LD      A,B
+        OR      C
+        JR      NZ,DLY
+        POP     BC
+        POP     AF
+        RET
+;
+ROMFRE  EQU     512-($-ROM)
+        DS      ROMFRE,0        ;FILL UNUSED ROM WITH ZEROS
+;
+ ;       .DEPHASE
+;
+        END
+
+	output_bin "C:\fred",0,$200
